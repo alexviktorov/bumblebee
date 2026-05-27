@@ -343,7 +343,9 @@ func looksUnresolvedShellVar(s string) bool {
 //
 //	npx / bunx                          -> first non-flag arg
 //	pnpm/yarn/bun/npm dlx|exec|x|run    -> first non-flag arg past sub
-//	uvx / pipx                          -> first non-flag arg
+//	uvx                                 -> first non-flag arg; honors --from,
+//	                                       skips uv value-taking flags
+//	pipx                                -> first non-flag arg
 //	uv / uv tool run                    -> first non-flag arg past sub,
 //	                                       also honors --from <pkg>
 //	docker run                          -> last positional non-flag is image
@@ -385,7 +387,20 @@ func inferPackageFromArgs(cmd string, args []string) (spec, launcher string) {
 		}
 		return firstNonFlag(args, subcommands, npmValueTakingFlags), ""
 	case "uvx":
-		return firstNonFlag(args, nil, nil), "uv"
+		// uvx <tool> == uv tool run <tool>. Honor "--from <pkg>" / "--from=<pkg>"
+		// (uvx lets the entry-point name and the package differ; only --from
+		// names the package), then skip uv value-taking flags so a dependency,
+		// interpreter, or credential-bearing index URL is not misread as the
+		// tool. Mirrors the "uv" branch below.
+		for i, a := range args {
+			if a == "--from" && i+1 < len(args) {
+				return args[i+1], "uv"
+			}
+			if pkg, ok := strings.CutPrefix(a, "--from="); ok {
+				return pkg, "uv"
+			}
+		}
+		return firstNonFlag(args, nil, uvValueTakingFlags), "uv"
 	case "uv":
 		// Recognize "uv tool run <pkg>" and "uv run <pkg>". Honor "--from <pkg>"
 		// when present: uv allows the entry-point name and the package name
@@ -584,6 +599,38 @@ var npmValueTakingFlags = map[string]bool{
 	"--lockfile-dir":      true,
 	"--config":            true,
 	"--config-file":       true,
+}
+
+// uvValueTakingFlags lists uv / uvx (== "uv tool run") flags that consume a
+// separate value argument, so the value is not misread as the tool. The chief
+// hazard is a credential-bearing index URL (--index-url, --default-index, …):
+// if not skipped, the URL — possibly with an embedded token — would land in
+// PackageName. "--from" names the package and is also handled explicitly in
+// the uvx case; the "--flag=value" form is handled by firstNonFlag.
+//
+// Intentionally conservative, mirroring npmValueTakingFlags: it covers the
+// flags that actually appear in uvx MCP launcher commands (--from, --with,
+// --python) plus the credential-adjacent index/registry flags. uv's long tail
+// of resolver/build-tuning options is deliberately omitted — those do not
+// appear in launcher configs and carry no credentials, and an omitted
+// value-flag's value is at worst misread as the tool (a benign, rare false
+// positive), matching how npm handles unlisted flags. Add a flag here only
+// when it appears in real configs or can carry a credential.
+var uvValueTakingFlags = map[string]bool{
+	"--from":              true,
+	"--with":              true,
+	"-w":                  true,
+	"--with-editable":     true,
+	"--with-requirements": true,
+	"--python":            true,
+	"-p":                  true,
+	"--index-url":         true,
+	"-i":                  true,
+	"--extra-index-url":   true,
+	"--default-index":     true,
+	"--index":             true,
+	"--find-links":        true,
+	"-f":                  true,
 }
 
 // looksLikePackageSpec reports whether s is a plausible

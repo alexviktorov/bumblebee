@@ -55,6 +55,20 @@ func TestInferPackageFromArgs(t *testing.T) {
 		{"docker", []string{"run", "-e", "FOO=bar", "--name", "x", "mcp/slack"}, "mcp/slack", "docker"},
 		{"docker", []string{"run", "--env-file=.env", "ghcr.io/github/github-mcp-server"}, "ghcr.io/github/github-mcp-server", "docker"},
 		{"/usr/local/bin/docker", []string{"run", "mcp/slack"}, "mcp/slack", "docker"},
+		// uvx (== uv tool run): honor --from (both forms); skip the conservative
+		// set of value-taking flags so a dependency, interpreter, or
+		// credential-bearing index URL is not read as the tool. Bare
+		// `uvx <tool>` is covered above.
+		{"uvx", []string{"--from", "real-pkg", "entry"}, "real-pkg", "uv"},
+		{"uvx", []string{"--from=real-pkg", "entry"}, "real-pkg", "uv"},
+		{"uvx", []string{"--with", "pandas", "my-mcp"}, "my-mcp", "uv"},
+		{"uvx", []string{"-p", "3.11", "my-mcp"}, "my-mcp", "uv"},
+		{"uvx", []string{"--index-url", "https://pypi.example/simple", "my-mcp"}, "my-mcp", "uv"},
+		// Conservative omission (mirrors npm): a resolver/tuning flag that is not
+		// in uvValueTakingFlags is treated as valueless, so its value is misread
+		// as the tool. Accepted — such flags don't appear in MCP launcher configs
+		// and carry no credentials.
+		{"uvx", []string{"--resolution", "highest", "my-mcp"}, "highest", "uv"},
 	}
 	for _, c := range cases {
 		gotSpec, gotLauncher := inferPackageFromArgs(c.cmd, c.args)
@@ -342,6 +356,48 @@ func TestScanConfig_UVRunDirectory(t *testing.T) {
 	// --from still wins even when "tool" is absent.
 	if r := byServer["from-flag"]; r.PackageName != "bugcrowd-mcp" || r.PackageManager != "uv" {
 		t.Errorf("from-flag: %+v", r)
+	}
+}
+
+// TestScanConfig_UVXFlags verifies the uvx path end-to-end: --from and
+// value-flag skipping resolve the real tool at confidence=low, and a git-URL
+// --from value (the real-world serena shape) is rejected and falls back to the
+// server id — so a possibly-credential-bearing URL never lands in PackageName.
+func TestScanConfig_UVXFlags(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mcp.json")
+	body := `{
+  "mcpServers": {
+    "from":    {"command":"uvx","args":["--from","real-pkg","entry"]},
+    "withdep": {"command":"uvx","args":["--with","pandas","my-mcp"]},
+    "gitfrom": {"command":"uvx","args":["--from","git+https://github.com/o/r.git","entry"]}
+  }
+}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out []model.Record
+	s := &Scanner{MaxFileSize: 1 << 20, Emit: func(r model.Record) { out = append(out, r) }}
+	if err := s.ScanConfig(path, model.Record{}); err != nil {
+		t.Fatal(err)
+	}
+	byServer := map[string]model.Record{}
+	for _, r := range out {
+		byServer[r.ServerName] = r
+	}
+	// Real package identities preserved, tagged package_manager=uv at low confidence.
+	for id, wantPkg := range map[string]string{"from": "real-pkg", "withdep": "my-mcp"} {
+		r := byServer[id]
+		if r.PackageName != wantPkg || r.PackageManager != "uv" || r.Confidence != "low" {
+			t.Errorf("%s: got name=%q pm=%q conf=%q, want %q/uv/low",
+				id, r.PackageName, r.PackageManager, r.Confidence, wantPkg)
+		}
+	}
+	// A git-URL --from value is not a registry package: fall back to the server
+	// id and never round-trip the URL into PackageName/RequestedSpec.
+	if r := byServer["gitfrom"]; r.PackageName != "gitfrom" || r.RequestedSpec != "" {
+		t.Errorf("gitfrom: got name=%q requested_spec=%q, want server-id fallback with empty spec",
+			r.PackageName, r.RequestedSpec)
 	}
 }
 

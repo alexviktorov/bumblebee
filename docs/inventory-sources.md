@@ -296,7 +296,10 @@ always preserved in `server_name`.
 For `uv run <script-or-dir>` without `--from <pkg>`, no package identity
 is inferred; the record falls back to the server id with `confidence=low`.
 `uvx`, `uv tool run <pkg>`, and `uv run --from <pkg> ...` use the
-published package name.
+published package name. For `uvx`, option values are skipped so a flag's
+value is not mistaken for the tool: `uvx --with <dep> <tool>` and
+`uvx --python <ver> <tool>` resolve to `<tool>`, and `uvx --from <pkg> ...`
+names `<pkg>`.
 
 Docker/OCI image refs split a pinned tag into `version`:
 `hashicorp/terraform-mcp-server:0.4.0` becomes
